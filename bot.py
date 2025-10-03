@@ -1,4 +1,3 @@
-
 import telebot
 from telebot import types
 import sqlite3
@@ -7,12 +6,13 @@ import os
 import time
 
 # ------------------- SOZLAMALAR -------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8462850011:AAH_iecHcprLVhoOoUtzorjBqvd_q0QvLJk")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8494279439:AAHjTl-MHuKZdLAud2SYjMxiGgSnAZSExGY")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 DB_PATH = "cases.db"
+CHANNELS_DB = "channels.db"
 
 # Adminlar va psixolog
-NEWS_ADMIN_ID = 6871157014
+NEWS_ADMIN_ID = 7589484102
 SUPER_ADMIN_ID = 6809167685
 ADMIN_FOR_PSY_ID = 1427892294  # Psixolog admin id
 CATEGORY_ADMINS = {
@@ -23,48 +23,6 @@ CATEGORY_ADMINS = {
     "Boshqa": [1427892294],
 }
 ADMIN_IDS = set(sum(CATEGORY_ADMINS.values(), []))
-
-# Guruh va kanal idlar
-TARGET_CHATS = [
-    -1003075537327,
-    -1002901402384,
-    -1002803468272,
-    -1003020411045,
-    -1001706722422,
-    -1001709375125,
-    -1002989893875,
-    -1002609338091,
-    -1002952514454,
-    -1002708637237,
-    -1001866090101,
-    -1003166818822,
-    -1001780743859,
-    -1002645823283,
-    -1002517388563,
-    -1003107213845,
-    -1002951215842,
-    -1001805339345,
-    -1003085789704,
-    -1002986043185,
-    -1002386806982,
-    -1003112092257,
-    -1001780743859,
-    -1003123547530,
-    -1003077767680,
-    -1002365188765,
-    -1002904042704,
-    -1002391293092,
-    -1003158609200,
-    -1002961831122,
-    -1002838620758,
-    -1002471279327,
-    -1002921557993,
-    -1002796184342,
-    -1001701319887,
-    -1002801043448,
-    -1002949455290,
-
-]
 
 # Komitet chat
 _COMMITTEE_CHAT = os.environ.get("COMMITTEE_CHAT_ID", "-1002949455290")
@@ -98,7 +56,19 @@ def init_db():
         )
         """)
         conn.commit()
+
+def init_channels_db():
+    with sqlite3.connect(CHANNELS_DB) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            chat_id INTEGER PRIMARY KEY
+        )
+        """)
+        conn.commit()
+
 init_db()
+init_channels_db()
 
 # ================== DB FUNKSIYALARI ==================
 def save_case(case):
@@ -137,6 +107,36 @@ def update_case_status(case_id, status, committee_note=None):
         else:
             cur.execute("UPDATE cases SET status = ? WHERE id = ?", (status, case_id))
         conn.commit()
+
+# ================== CHANNELS DB FUNKSIYALARI ==================
+def add_channel_to_db(chat_id):
+    with sqlite3.connect(CHANNELS_DB) as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO channels (chat_id) VALUES (?)", (chat_id,))
+        conn.commit()
+
+def remove_channel_from_db(chat_id):
+    with sqlite3.connect(CHANNELS_DB) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+
+def get_all_channels_from_db():
+    with sqlite3.connect(CHANNELS_DB) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM channels")
+        return [row[0] for row in cur.fetchall()]
+
+def is_bot_admin_in_chat(chat_id):
+    try:
+        admins = bot.get_chat_administrators(chat_id)
+        bot_id = bot.get_me().id
+        for adm in admins:
+            if getattr(adm, "user", None) and getattr(adm.user, "id", None) == bot_id:
+                return True
+    except Exception as e:
+        logger.debug(f"is_bot_admin_in_chat({chat_id}) error: {e}")
+    return False
 
 # ================== USER FLOW ==================
 USER_FLOW = {}
@@ -372,33 +372,118 @@ def report_flow(message):
         USER_FLOW.pop(uid, None)
         return
 
-# ================== NEWS_ADMIN POST (MATN/RASM + CAPTION) ==================
+# ================== CHANNEL REGISTRATION HANDLERS ==================
+# 1) /addchannel - admin shu kanal ichida yozsa chatni qo'shadi; yoki private-da /addchannel yozsa ko'rsatma beradi
+@bot.message_handler(commands=['addchannel'])
+def add_channel_cmd(message):
+    if message.from_user.id != NEWS_ADMIN_ID:
+        bot.reply_to(message, "❌ Ruxsat yo'q.")
+        return
+
+    # Agar bu buyruq kanal/guruh ichida berilgan bo'lsa -> qo'shish
+    if message.chat.type in ["group", "supergroup", "channel"]:
+        add_channel_to_db(message.chat.id)
+        bot.reply_to(message, f"✅ Kanal/guruh ro'yxatga qo'shildi: {message.chat.id}")
+        return
+
+    # Aks holda ko'rsatma
+    bot.reply_to(message, "Kanalni qo'shish uchun ikkita usul bor:\n"
+                          "1) Kanal ichida admin sifatida /addchannel buyrug'ini yozing.\n"
+                          "2) Kanalning istalgan xabarini menga (botga) **forward** qiling — shunda men kanalni ro'yxatga qo'shaman.")
+
+# 2) Agar NEWS_ADMIN_ID kanal xabarini buferga yuborsa -> avtomatik qo'shamiz
+@bot.message_handler(func=lambda m: getattr(m, "forward_from_chat", None) is not None)
+def handle_forwarded(m):
+    if m.from_user.id != NEWS_ADMIN_ID:
+        return
+    fchat = m.forward_from_chat
+    if not fchat:
+        return
+    add_channel_to_db(fchat.id)
+    bot.reply_to(m, f"✅ Kanal/guruh ro'yxatga qo'shildi: {fchat.id}")
+
+# /delchannel - o'chirish (kanalda yozilsa o'sha kanal, yoki private-da /delchannel <id>)
+@bot.message_handler(commands=['delchannel'])
+def del_channel_cmd(message):
+    if message.from_user.id != NEWS_ADMIN_ID:
+        bot.reply_to(message, "❌ Ruxsat yo'q.")
+        return
+    parts = message.text.strip().split()
+    # agar kanal ichida yozilgan bo'lsa
+    if message.chat.type in ["group", "supergroup", "channel"]:
+        cid = message.chat.id
+        remove_channel_from_db(cid)
+        bot.reply_to(message, f"🗑 Kanal o'chirildi: {cid}")
+        return
+    if len(parts) == 2:
+        try:
+            cid = int(parts[1])
+            remove_channel_from_db(cid)
+            bot.reply_to(message, f"🗑 Kanal o'chirildi: {cid}")
+            return
+        except:
+            pass
+    bot.reply_to(message, "❌ Foydalanish: /delchannel yoki kanal ichida /delchannel yoki /delchannel <chat_id>")
+
+# /listchannels - ro'yxatni ko'rish
+@bot.message_handler(commands=['listchannels'])
+def list_channels_cmd(message):
+    if message.from_user.id != NEWS_ADMIN_ID:
+        return
+    channels = get_all_channels_from_db()
+    if not channels:
+        bot.send_message(NEWS_ADMIN_ID, "📭 Ro'yxatda kanal yo'q.")
+        return
+    text = "📋 Ro'yxatdagi kanallar/guruhlar:\n" + "\n".join(str(c) for c in channels)
+    bot.send_message(NEWS_ADMIN_ID, text)
+
+# ================== NEWS_ADMIN POST (HAMMASIGA BIRDEK) ==================
 @bot.message_handler(func=lambda m: m.from_user.id == NEWS_ADMIN_ID and m.text == "📝 Yangi post qo‘shish")
 def admin_post_start(message):
-    msg = bot.send_message(NEWS_ADMIN_ID, "📣 Endi post matnini yozing yoki rasm yuboring (caption bilan):")
-    bot.register_next_step_handler(msg, admin_post_send)
+    msg = bot.send_message(NEWS_ADMIN_ID, "📝 Post matnini yozing yoki rasm yuboring (men ro'yxatdagi HAMMA kanallarga yuboraman):")
+    bot.register_next_step_handler(msg, admin_post_send_all)
 
-def admin_post_send(message):
-    if message.content_type == 'text':
-        text = message.text
-        for chat_id in TARGET_CHATS:
-            try:
-                bot.send_message(chat_id, text)
-            except Exception as e:
-                bot.send_message(NEWS_ADMIN_ID, f"❌ Xatolik: {e}")
-        bot.send_message(NEWS_ADMIN_ID, "✅ Post barcha kanallar va guruhlarga yuborildi.")
-    elif message.content_type == 'photo':
-        caption = message.caption or ""
-        photo_file_id = message.photo[-1].file_id
-        for chat_id in TARGET_CHATS:
-            try:
+def admin_post_send_all(message):
+    if message.from_user.id != NEWS_ADMIN_ID:
+        return
+
+    channels = get_all_channels_from_db()
+    if not channels:
+        bot.send_message(NEWS_ADMIN_ID, "❌ Ro'yxatda kanal yo'q. Iltimos /addchannel bilan kanal qo'shing.")
+        return
+
+    successful = []
+    removed = []
+    errors = []
+
+    for chat_id in channels:
+        # avval bot adminligini tekshiramiz
+        if not is_bot_admin_in_chat(chat_id):
+            # agar bot admin bo'lmasa, ro'yxatdan olib tashlaymiz
+            remove_channel_from_db(chat_id)
+            removed.append(chat_id)
+            continue
+        try:
+            if message.content_type == 'text':
+                bot.send_message(chat_id, message.text)
+            elif message.content_type == 'photo':
+                caption = message.caption or ""
+                photo_file_id = message.photo[-1].file_id
                 bot.send_photo(chat_id, photo_file_id, caption=caption)
-            except Exception as e:
-                bot.send_message(NEWS_ADMIN_ID, f"❌ Xatolik: {e}")
-        bot.send_message(NEWS_ADMIN_ID, "✅ Rasmli post barcha kanallar va guruhlarga yuborildi.")
-    else:
-        msg = bot.send_message(NEWS_ADMIN_ID, "❌ Faqat matn yoki rasm yuborishingiz mumkin. Qayta urinib ko‘ring:")
-        bot.register_next_step_handler(msg, admin_post_send)
+            else:
+                # boshqa media turlarini kerak bo'lsa qo'shish mumkin
+                bot.send_message(chat_id, "📢 Yangilik (admin tomonidan yuborildi) — media turi qo'llab-quvvatlanmadi.")
+            successful.append(chat_id)
+        except Exception as e:
+            logger.exception(f"admin_post_send_all to {chat_id} failed: {e}")
+            errors.append((chat_id, str(e)))
+
+    res = f"✅ Post yuborildi: {len(successful)} ta kanal/guruh.\n"
+    if removed:
+        res += "❗ Quyidagi kanallar ro'yxatdan olib tashlandi (bot admin emas):\n" + "\n".join(str(x) for x in removed) + "\n"
+    if errors:
+        res += "⚠️ Ba'zi chatlarda xatoliklar:\n" + "\n".join(f"{c}: {err}" for c,err in errors)
+    bot.send_message(NEWS_ADMIN_ID, res)
 
 # ================== RUN BOT ==================
 if __name__ == "__main__":
