@@ -6,14 +6,14 @@ import os
 import time
 
 # ------------------- SOZLAMALAR -------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8462850011:AAH_iecHcprLVhoOoUtzorjBqvd_q0QvLJk")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8312998591:AAGsfHlQBrw3Rmkk1WSjE-Bb5nUKD7HPay0")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 DB_PATH = "cases.db"
 CHANNELS_DB = "channels.db"
 
 # Adminlar va psixolog
-NEWS_ADMIN_ID = 8085370930
-SUPER_ADMIN_ID = 6809167685
+NEWS_ADMIN_ID = 7589484103
+SUPER_ADMIN_ID = 7589484102
 ADMIN_FOR_PSY_ID = 1427892294  # Psixolog admin id
 CATEGORY_ADMINS = {
     "Ayollar muammosi": [1427892294],
