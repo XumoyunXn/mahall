@@ -1,462 +1,332 @@
-# mahalla_news_bot.py
-import telebot
-from telebot import types
+"""
+Professional Telegram Bot (Full Extended Version)
+- Superadmin: statistikani ko‘radi
+- Yangilik admin: kanal/guruhga yangilik yuboradi
+- Bo‘lim adminlar: faqat o‘z yo‘nalishidagi murojaatlarga javob beradi
+- Foydalanuvchilar: murojaat yuboradi
+- Har bir xabar, foydalanuvchi, kanal/guruh bazaga yoziladi
+"""
+
+import os
 import sqlite3
 import logging
-import os
-import time
-import sys
-import traceback
-
-# ------------------- SOZLAMALAR -------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8462850011:AAH_iecHcprLVhoOoUtzorjBqvd_q0QvLJk")  # tavsiya: tokenni env ga qo'ying
-if not TELEGRAM_TOKEN:
-    print("❗ TELEGRAM_TOKEN muhim — env ga qo'ying yoki faylda tekshiring.")
-    # agar siz to'g'ridan-to'g'ri faylda token qoldirmoqchi bo'lsangiz quyidagi qatorni oching:
-    # TELEGRAM_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-DB_PATH = "cases.db"
-CHANNELS_DB = "channels.db"
-
-# Adminlar (o'zgartiring)
-NEWS_ADMIN_ID = int(os.environ.get("NEWS_ADMIN_ID", "8085370930"))
-SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "6809167685"))
-ADMIN_FOR_PSY_ID = int(os.environ.get("ADMIN_FOR_PSY_ID", "1427892294"))
-
-CATEGORY_ADMINS = {
-    "Ayollar muammosi": [ADMIN_FOR_PSY_ID],
-    "Oilaviy muammo": [ADMIN_FOR_PSY_ID],
-    "Iqtisodiy yordam": [ADMIN_FOR_PSY_ID],
-    "Sogʻliq (psixolog)": [ADMIN_FOR_PSY_ID],
-    "Boshqa": [ADMIN_FOR_PSY_ID],
-}
-ADMIN_IDS = set(sum(CATEGORY_ADMINS.values(), []))
-
-_COMMITTEE_CHAT = os.environ.get("COMMITTEE_CHAT_ID", "-1002949455290")
-try:
-    COMMITTEE_CHAT_ID = int(_COMMITTEE_CHAT)
-except:
-    COMMITTEE_CHAT_ID = None
-
-# Logging — faylga yozamiz
-LOG_FILE = "bot.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)]
+from datetime import datetime
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
+    CallbackQueryHandler,
+    ChatMemberHandler,
+)
+from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
+
+# --------------- CONFIG ----------------
+TOKEN = "8462850011:AAH_iecHcprLVhoOoUtzorjBqvd_q0QvLJk"
+SUPER_ADMIN_ID = 6809167685
+NEWS_ADMIN_IDS = [8085370930]
+ADMIN_FOR_PSY_ID = 1427892294
+
+DB_PATH = "data/bot_full.db"
+
+ADMINS = {
+    "Ayollar muammosi": [1427892294],
+    "Oilaviy muammo": [1427892294],
+    "Iqtisodiy yordam": [1427892294],
+    "Sogʻliq (psixolog)": [ADMIN_FOR_PSY_ID],
+    "Boshqa": [1427892294],
+}
+
+# --------------- LOGGING ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ================== DB INIT ==================
-def init_db():
-    with sqlite3.connect(DB_PATH, timeout=30) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            user_name TEXT,
-            created_at INTEGER,
-            full_name TEXT,
-            address TEXT,
-            category TEXT,
-            description TEXT,
-            phone TEXT,
-            urgency TEXT,
-            status TEXT DEFAULT 'new',
-            committee_note TEXT
-        )
-        """)
-        conn.commit()
+# --------------- DATABASE ----------------
+def ensure_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        name TEXT,
+        mahalla TEXT,
+        phone TEXT,
+        last_message TEXT,
+        last_seen TIMESTAMP
+    );
 
-def init_channels_db():
-    with sqlite3.connect(CHANNELS_DB, timeout=30) as conn:
-        cur = conn.cursor()
-        cur.execute("""CREATE TABLE IF NOT EXISTS channels (chat_id INTEGER PRIMARY KEY)""")
-        conn.commit()
+    CREATE TABLE IF NOT EXISTS reports(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        category TEXT,
+        urgency TEXT,
+        details TEXT,
+        status TEXT DEFAULT 'jarayonda',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
-init_db()
-init_channels_db()
+    CREATE TABLE IF NOT EXISTS messages(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_id INTEGER,
+        target_id INTEGER,
+        role TEXT,
+        message_text TEXT,
+        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
-# ================== CHANNEL FUNKSIYALAR ==================
-def add_channel_to_db(chat_id):
-    try:
-        with sqlite3.connect(CHANNELS_DB, timeout=30) as conn:
-            cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO channels (chat_id) VALUES (?)", (chat_id,))
-            conn.commit()
-        logger.info(f"channels.db: qo‘shildi {chat_id}")
-    except Exception as e:
-        logger.exception(f"add_channel_to_db xato: {e}")
+    CREATE TABLE IF NOT EXISTS channels(
+        chat_id INTEGER PRIMARY KEY,
+        title TEXT,
+        type TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    conn.commit()
+    conn.close()
 
-def remove_channel_from_db(chat_id):
-    try:
-        with sqlite3.connect(CHANNELS_DB, timeout=30) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
-            conn.commit()
-        logger.info(f"channels.db: o‘chirildi {chat_id}")
-    except Exception as e:
-        logger.exception(f"remove_channel_from_db xato: {e}")
+def db_execute(query, params=(), fetchone=False, fetchall=False):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(query, params)
+    result = None
+    if fetchone:
+        result = c.fetchone()
+    elif fetchall:
+        result = c.fetchall()
+    conn.commit()
+    conn.close()
+    return result
 
-def get_all_channels_from_db():
-    try:
-        with sqlite3.connect(CHANNELS_DB, timeout=30) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT chat_id FROM channels")
-            return [row[0] for row in cur.fetchall()]
-    except Exception as e:
-        logger.exception(f"get_all_channels_from_db xato: {e}")
-        return []
+# --------------- CHANNELS ----------------
+def add_channel(chat_id, title, chat_type):
+    db_execute("INSERT OR REPLACE INTO channels(chat_id, title, type) VALUES(?,?,?)", (chat_id, title, chat_type))
 
-def is_bot_admin_in_chat(chat_id):
-    try:
-        admins = bot.get_chat_administrators(chat_id)
-        bot_id = bot.get_me().id
-        return any(getattr(adm.user, "id", None) == bot_id for adm in admins)
-    except Exception as e:
-        logger.debug(f"is_bot_admin_in_chat({chat_id}) error: {e}")
-        return False
+def remove_channel(chat_id):
+    db_execute("DELETE FROM channels WHERE chat_id=?", (chat_id,))
 
-# ================== MY_CHAT_MEMBER HANDLER (SAFE) ==================
-@bot.my_chat_member_handler()
-def handle_new_admin_status(update):
-    """
-    Bot kanalga/admin bo'lganda/chiqib ketganda avtomatik qo'shadi/olib tashlaydi.
-    Himoyalangan: update.* elementlari None bo'lishi mumkin, shuning uchun guard bilan.
-    """
-    try:
-        chat = getattr(update, "chat", None)
-        new_cm = getattr(update, "new_chat_member", None)
-        old_cm = getattr(update, "old_chat_member", None)
+def list_channels():
+    return db_execute("SELECT chat_id, title FROM channels", fetchall=True) or []
 
-        if chat is None or new_cm is None:
-            # ba'zan yangilanish boshqa tipda bo'ladi
+# --------------- STATES ----------------
+(ASK_NAME, ASK_MAHALLA, ASK_PHONE, ASK_CATEGORY, ASK_DETAILS, ASK_URGENCY, NEWS_TEXT) = range(7)
+
+# --------------- START ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    # Super admin
+    if uid == SUPER_ADMIN_ID:
+        kb = ReplyKeyboardMarkup([["📊 Statistika"]], resize_keyboard=True)
+        await update.message.reply_text("Assalomu alaykum, Super Admin!", reply_markup=kb)
+        return
+
+    # Yangilik admin
+    if uid in NEWS_ADMIN_IDS:
+        kb = ReplyKeyboardMarkup([["📰 Yangilik yuborish"]], resize_keyboard=True)
+        await update.message.reply_text("Assalomu alaykum, Yangilik Admin!", reply_markup=kb)
+        return
+
+    # Bo‘lim admin
+    for cat, admins in ADMINS.items():
+        if uid in admins:
+            await update.message.reply_text(f"Siz '{cat}' bo‘limi adminisiz.")
             return
 
-        bot_info = bot.get_me()
-        bot_id = getattr(bot_info, "id", None)
-        new_user = getattr(new_cm, "user", None)
-        new_status = getattr(new_cm, "status", None)
+    # Oddiy foydalanuvchi
+    await update.message.reply_text("Ismingizni kiriting:", reply_markup=ReplyKeyboardRemove())
+    return ASK_NAME
 
-        # faqat botga tegishli status o'zgarishini ko'ramiz
-        if new_user and getattr(new_user, "id", None) == bot_id:
-            logger.info(f"my_chat_member: bot status update in chat {chat.id}, status={new_status}")
-            if new_status in ("administrator", "creator"):
-                add_channel_to_db(chat.id)
-                try:
-                    bot.send_message(chat.id, "🤖 Bot kanalga ulandi va endi avtomatik post joylay oladi!")
-                except Exception as e:
-                    logger.debug(f"Bot kanalga xabarnomani yuborada yomm: {e}")
-            elif new_status in ("left", "kicked"):
-                remove_channel_from_db(chat.id)
-
-    except Exception as e:
-        logger.exception(f"handle_new_admin_status xato: {e}")
-
-# ================== CASE FUNKSIYALARI ==================
-def save_case(case):
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO cases (user_id, user_name, created_at, full_name, address, category, description, phone, urgency, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
-            """, (
-                case.get('user_id'), case.get('user_name'), int(time.time()),
-                case.get('full_name'), case.get('address'), case.get('category'),
-                case.get('description'), case.get('phone'), case.get('urgency')
-            ))
-            conn.commit()
-            return cur.lastrowid
-    except Exception as e:
-        logger.exception(f"save_case xato: {e}")
-        return None
-
-def get_case(case_id):
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id, user_id, user_name, created_at, full_name, address, category, description, phone, urgency, status, committee_note FROM cases WHERE id = ?", (case_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            keys = ["id","user_id","user_name","created_at","full_name","address","category","description","phone","urgency","status","committee_note"]
-            return dict(zip(keys, row))
-    except Exception as e:
-        logger.exception(f"get_case xato: {e}")
-        return None
-
-def update_case_status(case_id, status, committee_note=None):
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30) as conn:
-            cur = conn.cursor()
-            if committee_note is not None:
-                cur.execute("UPDATE cases SET status = ?, committee_note = ? WHERE id = ?", (status, committee_note, case_id))
-            else:
-                cur.execute("UPDATE cases SET status = ? WHERE id = ?", (status, case_id))
-            conn.commit()
-    except Exception as e:
-        logger.exception(f"update_case_status xato: {e}")
-
-# ================== USER FLOW ==================
-USER_FLOW = {}
-REPORT_STEPS = ['full_name', 'address', 'category', 'description', 'phone', 'urgency']
-CATEGORY_OPTIONS = list(CATEGORY_ADMINS.keys())
-URGENCY_OPTIONS = ['Past', 'Oʻrta', 'Yuqori (shoshilinch)']
-
-# ================== KOMITETGA YUBORISH ==================
-def notify_committee(case_id):
-    case = get_case(case_id)
-    if not case:
-        logger.warning(f"notify_committee: case {case_id} topilmadi")
-        return
-    text = (
-        f"📌 Yangi murojaat (ID: {case_id})\n"
-        f"👤 F.O.: {case.get('full_name','-')}\n"
-        f"📍 Manzil: {case.get('address','-')}\n"
-        f"📂 Toifa: {case.get('category','Boshqa')}\n"
-        f"📞 Tel: {case.get('phone','-')}\n"
-        f"⚡ Shoshilinchlik: {case.get('urgency','-')}\n\n"
-        f"📝 Ta'rif:\n{case.get('description','-')}\n\n"
-        f"👤 Foydalanuvchi: @{case.get('user_name') or case.get('user_id')}"
+# --------------- SUPER ADMIN ----------------
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != SUPER_ADMIN_ID:
+        return await update.message.reply_text("❌ Sizda bu buyruq uchun ruxsat yo‘q.")
+    users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
+    total = db_execute("SELECT COUNT(*) FROM reports", fetchone=True)[0]
+    msgs = db_execute("SELECT COUNT(*) FROM messages", fetchone=True)[0]
+    channels = db_execute("SELECT COUNT(*) FROM channels", fetchone=True)[0]
+    await update.message.reply_text(
+        f"📊 *Statistika:*\n\n"
+        f"👥 Foydalanuvchilar: {users}\n"
+        f"📩 Murojaatlar: {total}\n"
+        f"💬 Yozishmalar: {msgs}\n"
+        f"📢 Kanallar / Guruhlar: {channels}",
+        parse_mode=ParseMode.MARKDOWN
     )
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📩 Psixolog jo'natish", callback_data=f"assign_psy|{case_id}"))
-    kb.add(types.InlineKeyboardButton("✅ Hal qilindi", callback_data=f"mark_resolved|{case_id}"))
-    kb.add(types.InlineKeyboardButton("✉️ Foydalanuvchiga yozish (Admin)", callback_data=f"msg_user|{case_id}"))
-    kb.add(types.InlineKeyboardButton("✉️ Foydalanuvchiga yozish (Psixolog)", callback_data=f"msg_user_psy|{case_id}"))
 
-    if COMMITTEE_CHAT_ID:
+# --------------- YANGILIK ADMIN ----------------
+async def ask_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in NEWS_ADMIN_IDS:
+        return
+    await update.message.reply_text("Yuboriladigan yangilik matnini kiriting:",
+                                    reply_markup=ReplyKeyboardMarkup([["❌ Bekor qilish"]], resize_keyboard=True))
+    context.user_data["awaiting_news"] = True
+    return NEWS_TEXT
+
+async def receive_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_news"):
+        return
+    msg = update.message
+    count = 0
+    for chat_id, title in list_channels():
         try:
-            bot.send_message(COMMITTEE_CHAT_ID, text, reply_markup=kb)
+            await context.bot.copy_message(chat_id=chat_id, from_chat_id=msg.chat.id, message_id=msg.message_id)
+            count += 1
         except Exception as e:
-            logger.exception(f"notify_committee: {e}")
+            logger.warning(f"Yuborilmadi {chat_id}: {e}")
+    await update.message.reply_text(f"✅ Yangilik {count} ta joyga yuborildi.")
+    context.user_data.pop("awaiting_news", None)
+    return ConversationHandler.END
 
-    for aid in CATEGORY_ADMINS.get(case.get('category'), []):
-        try:
-            bot.send_message(aid, text, reply_markup=kb)
-        except Exception as e:
-            logger.exception(f"notify_committee adminga yuborishda xato: {e}")
+# --------------- USER FLOW ----------------
+async def ask_name(update, context):
+    uid = update.effective_user.id
+    db_execute("INSERT OR REPLACE INTO users(user_id, username, name, last_seen) VALUES(?,?,?,?)",
+               (uid, update.effective_user.username or "", update.message.text, datetime.now()))
+    await update.message.reply_text("🏘 Mahallangizni kiriting:")
+    return ASK_MAHALLA
 
-    if case.get('category') == "Sogʻliq (psixolog)":
-        try:
-            bot.send_message(ADMIN_FOR_PSY_ID, text, reply_markup=kb)
-        except Exception as e:
-            logger.exception(f"notify_committee psixologga yuborishda xato: {e}")
+async def ask_mahalla(update, context):
+    db_execute("UPDATE users SET mahalla=? WHERE user_id=?", (update.message.text, update.effective_user.id))
+    await update.message.reply_text("📞 Telefon raqamingizni kiriting:")
+    return ASK_PHONE
 
-# ================== /start ==================
-@bot.message_handler(commands=['start'])
-def start_handler(message):
-    uid = message.from_user.id
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    if uid == NEWS_ADMIN_ID:
-        markup.add("📝 Yangi post qo‘shish")
-        bot.send_message(uid, "Assalomu alaykum! Siz yangilik yuborishingiz mumkin.", reply_markup=markup)
-    else:
-        markup.add("✍️ Murojaat yuborish")
-        bot.send_message(uid, "👋 Salom! Men *Mahalla yordam botiman.*", parse_mode="Markdown", reply_markup=markup)
+async def ask_phone(update, context):
+    db_execute("UPDATE users SET phone=? WHERE user_id=?", (update.message.text, update.effective_user.id))
+    kb = ReplyKeyboardMarkup([[c] for c in ADMINS.keys()], resize_keyboard=True)
+    await update.message.reply_text("🧩 Muammo turini tanlang:", reply_markup=kb)
+    return ASK_CATEGORY
 
-# ================== FOYDALANUVCHI MUROJAATI ==================
-@bot.message_handler(func=lambda m: m.text == "✍️ Murojaat yuborish")
-def start_report(message):
-    uid = message.from_user.id
-    if uid in ADMIN_IDS or uid in [SUPER_ADMIN_ID, ADMIN_FOR_PSY_ID, NEWS_ADMIN_ID]:
-        bot.send_message(uid, "❌ Siz murojaat yubora olmaysiz.")
+async def ask_category(update, context):
+    category = update.message.text
+    if category not in ADMINS:
+        return await update.message.reply_text("Iltimos, menyudan tanlang.")
+    context.user_data["report"] = {"category": category}
+    await update.message.reply_text("📝 Muammo tafsilotlarini yozing:", reply_markup=ReplyKeyboardRemove())
+    return ASK_DETAILS
+
+async def ask_details(update, context):
+    context.user_data["report"]["details"] = update.message.text
+    kb = ReplyKeyboardMarkup([["Juda shoshilinch", "O‘rtacha", "Oddiy"]], resize_keyboard=True)
+    await update.message.reply_text("⚡ Muhimlik darajasini tanlang:", reply_markup=kb)
+    return ASK_URGENCY
+
+async def ask_urgency(update, context):
+    urgency = update.message.text
+    rep = context.user_data["report"]
+    uid = update.effective_user.id
+    db_execute("INSERT INTO reports(user_id, category, urgency, details) VALUES(?,?,?,?)",
+               (uid, rep["category"], urgency, rep["details"]))
+
+    # Foydalanuvchi ma’lumotini olish
+    user = db_execute("SELECT name, mahalla, phone FROM users WHERE user_id=?", (uid,), fetchone=True)
+    name, mahalla, phone = user
+
+    msg_text = (
+        f"📩 *Yangi murojaat:*\n\n"
+        f"👤 Ism: {escape_markdown(name)}\n"
+        f"🏘 Mahalla: {escape_markdown(mahalla)}\n"
+        f"📞 Tel: {escape_markdown(phone)}\n"
+        f"💬 Bo‘lim: {escape_markdown(rep['category'])}\n"
+        f"⚡ Daraja: {escape_markdown(urgency)}\n"
+        f"📝 Tafsilot: {escape_markdown(rep['details'])}\n"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✉️ Foydalanuvchiga yozish", callback_data=f"msg_{uid}")]
+    ])
+
+    for admin_id in ADMINS.get(rep["category"], []):
+        await context.bot.send_message(chat_id=admin_id, text=msg_text,
+                                       parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+    await update.message.reply_text("✅ Murojaatingiz qabul qilindi. Rahmat!")
+    return ConversationHandler.END
+
+# --------------- ADMIN - REPLY ----------------
+async def admin_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    target_id = int(query.data.split("_")[1])
+    admin_id = query.from_user.id
+
+    allowed = any(admin_id in admins for admins in ADMINS.values())
+    if not allowed:
+        return await query.message.reply_text("❌ Sizda bu foydalanuvchiga yozish uchun ruxsat yo‘q.")
+
+    context.user_data["reply_to"] = target_id
+    await query.message.reply_text("✉️ Foydalanuvchiga yuboriladigan xabarni kiriting:")
+
+async def admin_send_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "reply_to" not in context.user_data:
         return
-    USER_FLOW[uid] = {'step': 0, 'data': {'user_id': uid, 'user_name': message.from_user.username or None}}
-    bot.send_message(uid, "Iltimos, to‘liq ismingizni kiriting:")
+    target_id = context.user_data.pop("reply_to")
+    msg = update.message.text
+    admin_id = update.effective_user.id
 
-@bot.message_handler(func=lambda m: m.from_user.id in USER_FLOW)
-def report_flow(message):
-    uid = message.from_user.id
-    flow = USER_FLOW.get(uid)
-    if not flow:
-        return
-    step_idx = flow['step']
-    if step_idx >= len(REPORT_STEPS):
-        USER_FLOW.pop(uid, None)
-        return
-    text = (message.text or "").strip()
-    key = REPORT_STEPS[step_idx]
-
-    # oddiy validatsiya
-    if key == 'category' and text not in CATEGORY_OPTIONS:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        for c in CATEGORY_OPTIONS: kb.add(c)
-        bot.send_message(uid, "❌ Iltimos toifalardan birini tanlang.", reply_markup=kb)
-        return
-    if key == 'urgency' and text not in URGENCY_OPTIONS:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        for u in URGENCY_OPTIONS: kb.add(u)
-        bot.send_message(uid, "❌ Iltimos shoshilinchlikni tanlang.", reply_markup=kb)
-        return
-
-    flow['data'][key] = text
-    flow['step'] += 1
-
-    # navbatdagi savollar
-    next_step = flow['step']
-    if next_step == 1:
-        bot.send_message(uid, "📍 Manzilingizni kiriting:")
-    elif next_step == 2:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        for c in CATEGORY_OPTIONS: kb.add(c)
-        bot.send_message(uid, "📂 Toifani tanlang:", reply_markup=kb)
-    elif next_step == 3:
-        bot.send_message(uid, "📝 Muammo tafsilotlarini yozing:", reply_markup=types.ReplyKeyboardRemove())
-    elif next_step == 4:
-        bot.send_message(uid, "📞 Telefon raqamingizni kiriting:")
-    elif next_step == 5:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        for u in URGENCY_OPTIONS: kb.add(u)
-        bot.send_message(uid, "⚡ Shoshilinchlik darajasini tanlang:", reply_markup=kb)
-    elif next_step >= len(REPORT_STEPS):
-        case_id = save_case(flow['data'])
-        if case_id:
-            bot.send_message(uid, f"✅ Rahmat. Xabaringiz qabul qilindi. ID: #{case_id}", reply_markup=types.ReplyKeyboardRemove())
-            notify_committee(case_id)
-        else:
-            bot.send_message(uid, "❌ Murojaatni saqlashda xatolik yuz berdi.")
-        USER_FLOW.pop(uid, None)
-
-# ================== CHANNEL REGISTRATION HANDLERS (admin commands) ==================
-@bot.message_handler(commands=['addchannel'])
-def add_channel_cmd(message):
-    if message.from_user.id != NEWS_ADMIN_ID:
-        bot.reply_to(message, "❌ Ruxsat yo'q.")
-        return
-    # agar bu buyruq kanal ichida berilsa
-    if message.chat.type in ["group", "supergroup", "channel"]:
-        add_channel_to_db(message.chat.id)
-        bot.reply_to(message, f"✅ Kanal/guruh ro'yxatga qo'shildi: {message.chat.id}")
-        return
-    bot.reply_to(message, "Kanalni qo'shish uchun: kanal ichida admin sifatida /addchannel yozing yoki kanal xabarini menga forward qiling.")
-
-@bot.message_handler(func=lambda m: getattr(m, "forward_from_chat", None) is not None)
-def handle_forwarded(m):
-    # faqat NEWS_ADMIN_ID orqali qo'shamiz
-    if m.from_user.id != NEWS_ADMIN_ID:
-        return
-    fchat = m.forward_from_chat
-    if not fchat:
-        return
-    add_channel_to_db(fchat.id)
-    bot.reply_to(m, f"✅ Kanal/guruh ro'yxatga qo'shildi: {fchat.id}")
-
-@bot.message_handler(commands=['delchannel'])
-def del_channel_cmd(message):
-    if message.from_user.id != NEWS_ADMIN_ID:
-        bot.reply_to(message, "❌ Ruxsat yo'q.")
-        return
-    parts = message.text.strip().split()
-    if message.chat.type in ["group", "supergroup", "channel"]:
-        cid = message.chat.id
-        remove_channel_from_db(cid)
-        bot.reply_to(message, f"🗑 Kanal o'chirildi: {cid}")
-        return
-    if len(parts) == 2:
-        try:
-            cid = int(parts[1])
-            remove_channel_from_db(cid)
-            bot.reply_to(message, f"🗑 Kanal o'chirildi: {cid}")
-            return
-        except:
-            pass
-    bot.reply_to(message, "❌ Foydalanish: /delchannel yoki kanal ichida /delchannel yoki /delchannel <chat_id>")
-
-@bot.message_handler(commands=['listchannels'])
-def list_channels_cmd(message):
-    if message.from_user.id != NEWS_ADMIN_ID:
-        return
-    channels = get_all_channels_from_db()
-    if not channels:
-        bot.send_message(NEWS_ADMIN_ID, "📭 Ro'yxatda kanal yo'q.")
-        return
-    text = "📋 Ro'yxatdagi kanallar/guruhlar:\n" + "\n".join(str(c) for c in channels)
-    bot.send_message(NEWS_ADMIN_ID, text)
-
-# ================== NEWS ADMIN POST (HAMMASIGA BIRDEK) ==================
-@bot.message_handler(func=lambda m: m.from_user.id == NEWS_ADMIN_ID and m.text == "📝 Yangi post qo‘shish")
-def admin_post_start(message):
-    msg = bot.send_message(NEWS_ADMIN_ID, "📝 Post matnini yuboring (matn yoki rasm).")
-    bot.register_next_step_handler(msg, admin_post_send_all)
-
-def admin_post_send_all(message):
-    channels = get_all_channels_from_db()
-    if not channels:
-        bot.send_message(NEWS_ADMIN_ID, "❌ Ro'yxatda kanal yo'q.")
-        return
-
-    successful = []
-    removed = []
-    errors = []
-
-    for chat_id in channels:
-        # avval bot adminligini tekshiramiz
-        if not is_bot_admin_in_chat(chat_id):
-            remove_channel_from_db(chat_id)
-            removed.append(chat_id)
-            continue
-        try:
-            if message.content_type == 'text':
-                bot.send_message(chat_id, message.text)
-            elif message.content_type == 'photo':
-                bot.send_photo(chat_id, message.photo[-1].file_id, caption=message.caption or "")
-            else:
-                # boshqa media turlarini hozircha matn sifatida yuboramiz
-                bot.send_message(chat_id, "📢 Yangilik (admin tomonidan yuborildi) — media turi qo'llab-quvvatlanmadi.")
-            successful.append(chat_id)
-        except Exception as e:
-            logger.exception(f"admin_post_send_all to {chat_id} failed: {e}")
-            errors.append((chat_id, str(e)))
-
-    res = f"✅ Post yuborildi: {len(successful)} ta kanal/guruh.\n"
-    if removed:
-        res += "❗ Quyidagi kanallar ro'yxatdan olib tashlandi (bot admin emas):\n" + "\n".join(str(x) for x in removed) + "\n"
-    if errors:
-        res += "⚠️ Ba'zi chatlarda xatoliklar:\n" + "\n".join(f"{c}: {err}" for c,err in errors)
-    bot.send_message(NEWS_ADMIN_ID, res)
-
-# ================== CALLBACKS (soddalashtirilgan) ==================
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    data = call.data or ""
-    caller_id = call.from_user.id
-    call_id = call.id
-    if "|" in data:
-        action, case_id_str = data.split("|", 1)
-        try:
-            case_id = int(case_id_str)
-        except ValueError:
-            bot.answer_callback_query(call_id, "❌ Noto'g'ri ID")
-            return
-        case = get_case(case_id)
-        if not case:
-            bot.answer_callback_query(call_id, "❌ Case topilmadi")
-            return
-
-        if action == "mark_resolved":
-            update_case_status(case_id, "resolved")
-            bot.answer_callback_query(call_id, "✅ Hal qilindi deb belgilandi")
-            return
-
-        if action == "assign_psy":
-            bot.answer_callback_query(call_id, "📌 Psixologga yuborildi")
-            # psixologga yuborish logikasi shu yerda
-            try:
-                bot.send_message(ADMIN_FOR_PSY_ID, f"📌 ID: {case_id}\nF.O.: {case.get('full_name')}\n{case.get('description')}")
-                bot.send_message(caller_id, "✅ Psixologga yuborildi")
-            except Exception as e:
-                logger.exception(f"assign_psy xato: {e}")
-            return
-
-# ================== RUN BOT ==================
-if __name__ == "__main__":
     try:
-        logger.info("🤖 Bot ishga tushdi...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        await context.bot.send_message(chat_id=target_id, text=f"📬 *Admindan xabar:*\n\n{msg}",
+                                       parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("✅ Xabar foydalanuvchiga yuborildi.")
+        db_execute("INSERT INTO messages(sender_id, target_id, role, message_text) VALUES(?,?,?,?)",
+                   (admin_id, target_id, 'admin', msg))
     except Exception as e:
-        logger.exception(f"Bot ishlayotganda kutilmagan xato: {e}")
-        traceback.print_exc()
+        await update.message.reply_text(f"❌ Xabar yuborilmadi.\n{e}")
+
+# --------------- CHANNEL MONITOR ----------------
+async def my_chat_member(update, context):
+    chat = update.my_chat_member.chat
+    status = update.my_chat_member.new_chat_member.status
+    if status in ("administrator", "creator"):
+        add_channel(chat.id, getattr(chat, "title", ""), chat.type)
+    elif status in ("left", "kicked"):
+        remove_channel(chat.id)
+
+# --------------- MAIN ----------------
+def main():
+    ensure_db()
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(CallbackQueryHandler(admin_reply_button, pattern=r"^msg_\d+$"))
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
+            ASK_MAHALLA: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_mahalla)],
+            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_phone)],
+            ASK_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_category)],
+            ASK_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_details)],
+            ASK_URGENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_urgency)],
+        },
+        fallbacks=[CommandHandler("start", start)],
+    )
+    app.add_handler(conv)
+
+    news_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📰 Yangilik yuborish$"), ask_news)],
+        states={NEWS_TEXT: [MessageHandler(filters.ALL, receive_news)]},
+        fallbacks=[CommandHandler("start", start)],
+    )
+    app.add_handler(news_conv)
+
+    app.add_handler(MessageHandler(filters.Regex("^📊 Statistika$"), show_stats))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_to_user))
+    app.add_handler(CommandHandler("start", start))
+
+    print("✅ Bot ishga tushdi...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
